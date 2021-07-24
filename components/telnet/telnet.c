@@ -233,30 +233,44 @@ static char *eventToString(telnet_event_type_t type) {
 /**
  * Telnet handler.
  */
-void process_received_data(const char * buffer, size_t size){
-	//ESP_LOGD(tag, "received data, len=%d", event->data.size);
+void process_received_data(const char * buffer, size_t size) {
+    char *command;
 
-	char * command = malloc(size+1);
-	const char * c=buffer;
+    if (buffer[0] == '\e') {
+        // If the first character in the buffer is '\e' we disregard the whole 
+        // line because 'reasons'.
+    }
+    else if ((command = (char *)malloc(size + 1)) == NULL) {
+        // out of memory - silently ignore the input. 
+    }
+    else {
+        // Telnet input is presumed to be a buffer containing one line of input
+        // of size bytes that is terminated by '\r' and/or '\n'.
+        // Copy at most size bytes from buffer into command string, stopping if
+        // we see a line ending character.
 
-	// scrub from any escape command
-	if(*c == '\e') while (size && size-- && *c++ != '\n');
-	memcpy(command,c,size);
-	command[size]='\0';
-	if(command[0]!='\r' && command[0]!='\n'){
-		// echo the command buffer out to uart and run
-		if(bMirrorToUART){
-			write(uart_fd, command, size);
-		}
-		for(int i=strlen(command);i>=0;i--){
-			// strip any cr/lf
-			if(command[i]== '\n' || command[i]== '\r') command[i]= '\0';
-		}
-		run_command((char *)command);
-	}
-	free(command);
-
+        for (size_t ii = 0; ii < size; ++ii) {
+            if (buffer[ii] == '\n' || buffer[ii] == '\r') {
+                size = ii;
+                break;
+            }
+            else {
+                command[ii] = buffer[ii];
+            }
+        }
+        if (size != 0) {
+            command[size] = '\0';
+            // echo the command buffer out to UART and run
+            if (bMirrorToUART) {
+                write(uart_fd, command, size);
+                write(uart_fd, "\r\n", 2);
+            }
+            run_command(command);
+        }
+        free(command);
+    }
 }
+
 static void handle_telnet_events(
 		telnet_t *thisTelnet,
 		telnet_event_t *event,
