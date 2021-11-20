@@ -25,8 +25,6 @@
 #include "rotary_encoder.h"
 #include "globdefs.h"
 
-bool gpio36_39_used;
-
 static const char * TAG = "buttons";
 
 static int n_buttons = 0;
@@ -49,7 +47,15 @@ static EXT_RAM_ATTR struct button_s {
 	TimerHandle_t timer;
 } buttons[MAX_BUTTONS];
 
+// can't use EXT_RAM_ATTR for initialized structure
 static struct {
+	int gpio, level;
+	struct button_s *button;
+} polled_gpio[] = { {36, -1, NULL}, {39, -1, NULL}, {-1, -1, NULL} };
+
+static TimerHandle_t polled_timer;
+
+static EXT_RAM_ATTR struct {
 	QueueHandle_t queue;
 	void *client;
 	rotary_encoder_info_t info;
@@ -57,7 +63,7 @@ static struct {
 	rotary_handler handler;
 } rotary;
 
-static struct {
+static EXT_RAM_ATTR struct {
 	RingbufHandle_t rb;
 	infrared_handler handler;
 } infrared;
@@ -115,6 +121,22 @@ static void buttons_timer( TimerHandle_t xTimer ) {
 		xQueueSend(button_evt_queue, button, 0);
 		button->long_timer = false;
 	}
+}
+
+/****************************************************************************************
+ * Buttons polling timer
+ */
+static void buttons_polling( TimerHandle_t xTimer ) {
+	for (int i = 0; polled_gpio[i].gpio != -1; i++) {
+		if (!polled_gpio[i].button) continue;
+		
+		int level = gpio_get_level(polled_gpio[i].gpio);
+	
+		if (level != polled_gpio[i].level) {
+			polled_gpio[i].level = level;
+			buttons_timer(polled_gpio[i].button->timer);
+		}	
+	}	
 }
 
 /****************************************************************************************
@@ -252,14 +274,29 @@ void button_create(void *client, int gpio, int type, bool pull, int debounce, bu
 		}
 	}
 	
-	// nasty ESP32 bug: fire-up constantly INT on GPIO 36/39 if ADC1, AMP, Hall used which WiFi does when PS is activated
-	if (gpio == 36 || gpio == 39) gpio36_39_used = true;
-	
 	// and initialize level ...
 	buttons[n_buttons].level = gpio_get_level(gpio);
-
-	gpio_isr_handler_add(gpio, gpio_isr_handler, (void*) &buttons[n_buttons]);
-	gpio_intr_enable(gpio);
+	
+	// nasty ESP32 bug: fire-up constantly INT on GPIO 36/39 if ADC1, AMP, Hall used which WiFi does when PS is activated
+	for (int i = 0; polled_gpio[i].gpio != -1; i++) if (polled_gpio[i].gpio == gpio) {
+		if (!polled_timer) {
+			polled_timer = xTimerCreate("buttonsPolling", 100 / portTICK_RATE_MS, pdTRUE, polled_gpio, buttons_polling);		
+			xTimerStart(polled_timer, portMAX_DELAY);
+		}	
+		
+		polled_gpio[i].button = buttons + n_buttons;					
+		polled_gpio[i].level = gpio_get_level(gpio);
+		ESP_LOGW(TAG, "creating polled gpio %u, level %u", gpio, polled_gpio[i].level);		
+		
+		gpio = -1;
+		break;
+	}
+	
+	// only create timers and ISR is this is not a polled gpio
+	if (gpio != -1) {
+		gpio_isr_handler_add(gpio, gpio_isr_handler, (void*) &buttons[n_buttons]);
+		gpio_intr_enable(gpio);
+	}	
 
 	n_buttons++;
 }	
@@ -337,7 +374,8 @@ static void rotary_button_handler(void *id, button_event_e event, button_press_e
  * Create rotary encoder
  */
 bool create_rotary(void *id, int A, int B, int SW, int long_press, rotary_handler handler) {
-	if (A == -1 || B == -1) {
+	// nasty ESP32 bug: fire-up constantly INT on GPIO 36/39 if ADC1, AMP, Hall used which WiFi does when PS is activated
+	if (A == -1 || B == -1 || A == 36 || A == 39 || B == 36 || B == 39) {
 		ESP_LOGI(TAG, "Cannot create rotary %d %d", A, B);
 		return false;
 	}
@@ -348,9 +386,6 @@ bool create_rotary(void *id, int A, int B, int SW, int long_press, rotary_handle
 	rotary.client = id;
 	rotary.handler = handler;
 	
-	// nasty ESP32 bug: fire-up constantly INT on GPIO 36/39 if ADC1, AMP, Hall used which WiFi does when PS is activated
-	if (A == 36 || A == 39 || B == 36 || B == 39 || SW == 36 || SW == 39) gpio36_39_used = true;
-
     // Initialise the rotary encoder device with the GPIOs for A and B signals
     rotary_encoder_init(&rotary.info, A, B);
 		

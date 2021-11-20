@@ -14,6 +14,7 @@ But squeezelite-esp32 is highly extensible and you can add
 - Buttons and Rotary Encoder and map/combine them to various functions (play, pause, volume, next ...)
 - IR receiver (no pullup resistor or capacitor needed, just the 38kHz receiver)
 - Monochrome, GrayScale or Color displays using SPI or I2C (supported drivers are SH1106, SSD1306, SSD1322, SSD1326/7, SSD1351, ST7735, ST7789 and ILI9341).
+- Ethernet using a Microchip LAN8720 with RMII interface or Davicom DM9051 over SPI.
 
 Other features include
 
@@ -23,23 +24,25 @@ Other features include
  - Full web interface for further configuration/management
  - Firmware over-the-air update 
 
+To control the equalizer or use the display on LMS, a new player model is required and this is provided through a plugin that is part of LMS' 3rd party repositories
+
 ## Performances 
 *(opinions presented here so I = @philippe44)*
 The main build of squeezelite-esp32 is a 16 bits internal core with all calculations in 32 bits or float precision. This is a design choice I've made to preserve CPU performances (it is already stretching a lot the esp32 chipset) and optimize memory usage as we only have 4MB of usable RAM. Some might correctly comment that the WROVER module have 8MB of RAM, but the processor is only able to address 4MB and the remaining 4MB must be paginated by smaller blocks and I don't have patience to that. 
 
 Now, when I did the porting of squeezelite to esp32, I've also made the core 16 or 32 bits compatible at compile-time. So far, it works in 32 bits but less tests have been done. You can chose to compile it in 32 bits mode. I'm not very interested above 16 bits samples because it does not bring anything (I have an engineering background in theory of information). 
 
-| Capability                 |16 bits|32 bits| comment         						         |	
-|----------------------------|-------|-------|-------------------------------------------------------------------|
-| max sampling rate          |  192k |  96k  | 192k is very challenging, especially when combined with display   |
-| max bit depth              |  16   |  24   | 24 bits are truncated in 16 bits mode                             | 
-| spdif			     |16 bits|20 bits|		                                                         |
-| mp3, aac, opus, ogg/vorbis |  48k  |  48k  |		                                                         |
-| alac, flac, ogg/flac       |  96k  |  96k  | 		                                                         |
-| pcm, wav, aif              |  192k |  96k  |		                                                         |
-| equalizer                  |   Y   |   N   | 48kHz max (after resampling) - equalization skipped on 96k tracks |
-| resampling                 |   Y   |   N   |		                                                         |
-| cross-fade                 |  10s  |  <5s  | depends on buffer size and sampling rate		                 |
+| Capability                 |16 bits|32 bits| comment         						          |	
+|----------------------------|-------|-------|--------------------------------------------------------------------|
+| max sampling rate          |  192k |  96k  | 192k is very challenging, especially when combined with display    |
+| max bit depth              |  16   |  24   | 24 bits are truncated in 16 bits mode                              | 
+| spdif			     |16 bits|20 bits|		                                                          |
+| mp3, aac, opus, ogg/vorbis |  48k  |  48k  |		                                                          |
+| alac, flac, ogg/flac       |  96k  |  96k  | 		                                                          |
+| pcm, wav, aif              |  192k |  96k  |		                                                          |
+| equalizer                  |   Y   |   N   | 48kHz max (after resampling) - equalization skipped on >48k tracks |
+| resampling                 |   Y   |   N   |		                                                          |
+| cross-fade                 |  10s  |  <5s  | depends on buffer size and sampling rate		                  |
 
 The esp32 must run at 240 MHz, with Quad-SPI I/O at 80 MHz and a clock of 40 Mhz. Still, it's a lot to run, especially knowing that it has a serial Flash and PSRAM, so kudos to Espressif for their chipset optimization. Now, to have all the decoding, resampling, equalizing, gain, display, spectrum/vu is a very (very) delicate equilibrium between use of internal /external RAM, tasks priorities and buffer handling. It is not perfect and the more you push the system to the limit, the higher the risk that some files would not play (see below). In general, the display will always have the lowest priority and you'll notice slowdown in scrolling and VU/Spectrum refresh rates. Now, even display thread has some critical section and impacts the capabilities. For example, a 16 bits-depth color display with low SPI speed might prevent 24/96 flac to work but still work with pcm 24/96
 
@@ -68,7 +71,7 @@ NB: You can use the pre-build binaries SqueezeAMP4MBFlash which has all the hard
 - spdif_config: bck=33,ws=25,do=15
 
 ### ESP32-A1S
-Works with [ESP32-A1S](https://docs.ai-thinker.com/esp32-a1s) module that includes audio codec and headset output. You still need to use a demo board like [this](https://www.aliexpress.com/item/4001060963585.html) or an external amplifier if you want direct speaker connection. Note that there is a version with AC101 codec and another one with ES8388 (see below)
+Works with [ESP32-A1S](https://docs.ai-thinker.com/esp32-a1s) module that includes audio codec and headset output. You still need to use a demo board like [this](https://www.aliexpress.com/item/4001060963585.html) or an external amplifier if you want direct speaker connection. Note that there is a version with AC101 codec and another one with ES8388 with probably two variants - these boards are a mess (see below)
 
 The board shown above has the following IO set
 - amplifier: GPIO21
@@ -85,7 +88,6 @@ The board shown above has the following IO set
 
 So a possible config would be
 - set_GPIO: 21=amp,22=green:0,39=jack:0
-- dac_config: model=AC101,bck=27,ws=26,do=25,di=35,sda=33,scl=32 for ES83881
 - a button mapping: 
 ```
 [{"gpio":5,"normal":{"pressed":"ACTRLS_TOGGLE"}},{"gpio":18,"pull":true,"shifter_gpio":5,"normal":{"pressed":"ACTRLS_VOLUP"}, "shifted":{"pressed":"ACTRLS_NEXT"}}, {"gpio":23,"pull":true,"shifter_gpio":5,"normal":{"pressed":"ACTRLS_VOLDOWN"},"shifted":{"pressed":"ACTRLS_PREV"}}]
@@ -93,9 +95,10 @@ So a possible config would be
 for AC101
 - dac_config: model=AC101,bck=27,ws=26,do=25,di=35,sda=33,scl=32
  
-for ES8388 (not avail for now)
-- dac_config model=ES8388,bck=27,ws=26,do=25,sda=18,scl=23,i2c=16
-- dac_controlset: {"init":[{"reg":4,"val":60},{"reg":8,"val":0},{"reg":23,"val":24}]} (replace 24 by 32 for 32 bits bmode)
+for ES8388 (it seems that there are variants with same version number - a total mess)
+- dac_config: model=ES8388,bck=5,ws=25,do=26,sda=18,scl=23,i2c=16
+or
+- dac_config: model=ES8388,bck=27,ws=25,do=26,sda=33,scl=32,i2c=16
 ### T-WATCH2020 by LilyGo
 This is a fun [smartwatch](http://www.lilygo.cn/prod_view.aspx?TypeId=50036&Id=1290&FId=t3:50036:3) based on ESP32. It has a 240x240 ST7789 screen and onboard audio. Not very useful to listen to anything but it works. This is an example of a device that requires an I2C set of commands for its dac (see below). There is a build-option if you decide to rebuild everything by yourself, otherwise the I2S default option works with the following parameters
 
@@ -135,26 +138,27 @@ sda=<gpio>,scl=<gpio>[,port=0|1][,speed=<speed>]
 ```
 <strong>Please note that you can not use the same GPIO or port as the DAC</strong>
 ### SPI
-The NVS parameter "spi_config" set the spi's gpio used for generic purpose (e.g. display). Leave it blank to disable SPI usage. The DC parameter is needed for displays. Syntax is
+The esp32 has 4 SPI sub-systems, one is unaccessible so numbering is 0..2 and SPI0 is reserved for Flash/PSRAM. The NVS parameter "spi_config" set the spi's gpio used for generic purpose (e.g. display). Leave it blank to disable SPI usage. The DC parameter is needed for displays. Syntax is
 ```
-data=<gpio>,clk=<gpio>[,dc=<gpio>][,host=1|2]
+data|mosi=<gpio>,clk=<gpio>[,dc=<gpio>][,host=1|2][,miso=<gpio>]
 ``` 
+Default "host" is 1. The "miso" parameter is only used when SPI bus is to be shared with other peripheral (e.g. ethernet, see below), otherwise it can be omitted. Note that "data" can also be named "mosi". 
 ### DAC/I2S
 The NVS parameter "dac_config" set the gpio used for i2s communication with your DAC. You can define the defaults at compile time but nvs parameter takes precedence except for SqueezeAMP and A1S where these are forced at runtime. Syntax is
 ```
-bck=<gpio>,ws=<gpio>,do=<gpio>[,mute=<gpio>[:0|1][,model=TAS57xx|TAS5713|AC101|I2S][,sda=<gpio>,scl=gpio[,i2c=<addr>]]
+bck=<gpio>,ws=<gpio>,do=<gpio>[,mck][,mute=<gpio>[:0|1][,model=TAS57xx|TAS5713|AC101|I2S][,sda=<gpio>,scl=gpio[,i2c=<addr>]]
 ```
-if "model" is not set or is not recognized, then default "I2S" is used. I2C parameters are optional an only needed if your dac requires an I2C control (See 'dac_controlset' below). Note that "i2c" parameters are decimal, hex notation is not allowed.
+if "model" is not set or is not recognized, then default "I2S" is used. The option "mck" is used for some codecs that require a master clock (although they should not). Only GPIO0 can be used as MCLK and be aware that this cannot coexit with RMII Ethernet (see ethernet section below). I2C parameters are optional and only needed if your DAC requires an I2C control (See 'dac_controlset' below). Note that "i2c" parameters are decimal, hex notation is not allowed.
 
-The parameter "dac_controlset" allows definition of simple commands to be sent over i2c for init, power on and off using a JSON syntax:
+So far, TAS57xx, TAS5713, AC101, WM8978 and ES8388 are recognized models where the proper init sequence/volume/power controls are sent. For other codecs that might require an I2C commands, please use the parameter "dac_controlset" that allows definition of simple commands to be sent over i2c for init, power on and off using a JSON syntax:
 ```
 { init: [ {"reg":<register>,"val":<value>,"mode":<nothing>|"or"|"and"}, ... {{"reg":<register>,"val":<value>,"mode":<nothing>|"or"|"and"} ],
   poweron: [ {"reg":<register>,"val":<value>,"mode":<nothing>|"or"|"and"}, ... {{"reg":<register>,"val":<value>,"mode":<nothing>|"or"|"and"} ],
   poweroff: [ {"reg":<register>,"val":<value>,"mode":<nothing>|"or"|"and"}, ... {{"reg":<register>,"val":<value>,"mode":<nothing>|"or"|"and"} ] }
 ```
-This is standard JSON notation, so if you are not familiar with it, Google is your best friend. Be aware that the '...' means you can have as many entries as you want, it's not part of the syntax. Every section is optional, but it does not make sense to set i2c in the 'dac_config' parameter and not setting anything here. The parameter 'mode' allows to *or* the register with the value or to *and* it. Don't set 'mode' if you simply want to write. **Note that all values must be decimal**. You can use a validator like [this](https://jsonlint.com) to verify your syntax
+This is standard JSON notation, so if you are not familiar with it, Google is your best friend. Be aware that the '...' means you can have as many entries as you want, it's not part of the syntax. Every section is optional, but it does not make sense to set i2c in the 'dac_config' parameter and not setting anything here. The parameter 'mode' allows to *or* the register with the value or to *and* it. Don't set 'mode' if you simply want to write. The 'val parameter can be an array [v1, v2,...] to write a serie of bytes in a single i2c burst (in that case 'mode' is ignored). **Note that all values must be decimal**. You can use a validator like [this](https://jsonlint.com) to verify your syntax
 
-NB: For well-known configuration, this is ignored
+NB: For specific builds (all except I2S), all this is ignored. For know codecs, the built-in sequences can be overwritten using dac_controlset
 
 <strong>Please note that you can not use the same GPIO or port as the I2C</strong>
 ### SPDIF
@@ -203,7 +207,7 @@ SPI,width=<pixels>,height=<pixels>,cs=<gpio>[,back=<gpio>][,reset=<gpio>][,speed
 - ST7789 is a 240x320 65k (262k not enabled) color SPI [here](https://www.waveshare.com/product/displays/lcd-oled/lcd-oled-3/2inch-lcd-module.htm). It also exist with 240x240 displays. See **rotate** for use in portrait mode
 - ILI9341 is another 240x320 65k (262k capable) color SPI. I've not used it much, the driver it has been provided by one external contributor to the project
 
-To use the display on LMS, add repository https://raw.githubusercontent.com/sle118/squeezelite-esp32/master/plugin/repo.xml. You will then be able to tweak how the vu-meter and spectrum analyzer are displayed, as well as size of artwork. You can also install the excellent plugin "Music Information Screen" which is super useful to tweak the layout.
+You can tweak how the vu-meter and spectrum analyzer are displayed, as well as size of artwork through a dedicated menu in player's settings (don't forget to add the plugin).
 
 The NVS parameter "metadata_config" sets how metadata is displayed for AirPlay and Bluetooth. Syntax is
 ```
@@ -243,6 +247,7 @@ Syntax is:
 <gpio>=Vcc|GND|amp[:1|0]|ir|jack[:0|1]|green[:0|1]|red[:0|1]|spkfault[:0|1][,<repeated sequence for next GPIO>]
 ```
 You can define the defaults for jack, spkfault leds at compile time but nvs parameter takes precedence except for well-known configurations where these are forced at runtime.
+**Note that gpio 36 and 39 are input only and cannot use interrupt. When set to jack or speaker fault, a 100ms polling checks their value but that's expensive**
 ### LED 
 See §**set_GPIO** for how to set the green and red LEDs. In addition, their brightness can be controlled using the "led_brigthness" parameter. The syntax is
 ```
@@ -273,6 +278,7 @@ The SW gpio is optional, you can re-affect it to a pure button if you prefer but
 
 See also the "IMPORTANT NOTE" on the "Buttons" section and remember that when 'lms_ctrls_raw' (see below) is activated, none of these knobonly,volume,longpress options apply, raw button codes (not actions) are simply sent to LMS
 
+**Note that gpio 36 and 39 are input only and cannot use interrupt, so they cannot be set to A or B. When using them for SW, a 100ms polling is used which is expensive**
 ### Buttons
 Buttons are described using a JSON string with the following syntax
 ```
@@ -307,10 +313,11 @@ Where (all parameters are optionals except gpio)
 Where \<action\> is either the name of another configuration to load (remap) or one amongst
 
 ```
-ACTRLS_NONE, ACTRLS_VOLUP, ACTRLS_VOLDOWN, ACTRLS_TOGGLE, ACTRLS_PLAY, 
+ACTRLS_NONE, ACTRLS_POWER, ACTRLS_VOLUP, ACTRLS_VOLDOWN, ACTRLS_TOGGLE, ACTRLS_PLAY, 
 ACTRLS_PAUSE, ACTRLS_STOP, ACTRLS_REW, ACTRLS_FWD, ACTRLS_PREV, ACTRLS_NEXT, 
-BCTRLS_UP, BCTRLS_DOWN, BCTRLS_LEFT, BCTRLS_RIGHT,
-KNOB_LEFT, KNOB_RIGHT, KNOB_PUSH
+BCTRLS_UP, BCTRLS_DOWN, BCTRLS_LEFT, BCTRLS_RIGHT, 
+BCTRLS_PS1, BCTRLS_PS2, BCTRLS_PS3, BCTRLS_PS4, BCTRLS_PS5, BCTRLS_PS6,
+KNOB_LEFT, KNOB_RIGHT, KNOB_PUSH,	
 ```
 				
 One you've created such a string, use it to fill a new NVS parameter with any name below 16(?) characters. You can have as many of these configs as you can. Then set the config parameter "actrls_config" with the name of your default config
@@ -365,11 +372,52 @@ The benefit of the "raw" mode is that you can build a player which is as close a
 **Be aware that when using non "raw" mode, the CLI (Command Line Interface) of LMS is used and *must* be available without password**
 
 There is no good or bad option, it's your choice. Use the NVS parameter "lms_ctrls_raw" to change that option
+	
+**Note that gpio 36 and 39 are input only and cannot use interrupt. When using them for a button, a 100ms polling is started which is expensive. Long press is also likely to not work very well**
+### Ethernet (coming soon)
+Wired ethernet is supported by esp32 with various options but squeezelite is only supporting a Microchip LAN8720 with a RMII interface like [this](https://www.aliexpress.com/item/32858432526.html) or Davicom DM9051 over SPI like [that](https://www.amazon.com/dp/B08JLFWX9Z).
+	
+#### RMII (LAN8720)	
+- RMII PHY wiring is fixed and can not be changed
 
+| GPIO   | RMII Signal | Notes        |
+| ------ | ----------- | ------------ |
+| GPIO21 | TX_EN       | EMAC_TX_EN   |
+| GPIO19 | TX0         | EMAC_TXD0    |
+| GPIO22 | TX1         | EMAC_TXD1    |
+| GPIO25 | RX0         | EMAC_RXD0    |
+| GPIO26 | RX1         | EMAC_RXD1    |
+| GPIO27 | CRS_DV      | EMAC_RX_DRV  |
+
+- SMI (Serial Management Interface) wiring is not fixed and you can change it either in the configuration or using "eth_config" parameter with the following syntax:
+```
+model=lan8720,mdc=<gpio>,mdio=<gpio>[,rst=<gpio>]
+```
+Connecting a reset pin for the LAN8720 is optional but recommended to avoid that GPIO0 (50MHz input clock) locks the esp32 in download mode at boot time.
+- Clock
+	
+The APLL of the esp32 is required for the audio codec, so we **need** a LAN8720 that provides a 50MHz clock. That clock **must** be connected to GPIO0, there is no alternative. This means that if your DAC requires an MCLK, then you are out of luck. It is not possible to have both to work together. There might be some workaround using CLK_OUT2 and GPIO3, but I don't have time for this.
+#### SPI (DM9051)
+Ethernet over SPI is supported as well and requires less GPIOs but is obvsiously slower. Another benefit is that the SPI bus can be shared with the display, but it's also possible to have a dedicated SPI interface. The esp32 has 4 SPI sub-systems, one is unaccessible so numbering is 0..2 and SPI0 is reserved for Flash/PSRAM. The "eth_config" parameter syntax becomes:
+```
+model=dm9051,cs=<gpio>,speed=<clk_in_Hz>,intr=<gpio>[,host=<-1|1|2>][,rst=<gpio>][,mosi=<gpio>,miso=<gpio>,clk=<gpio>]
+```
+- To use the system SPI, shared with display (see spi_config) "host" must be set to -1. Any other value will reserve the SPI interface (careful of conflict with spi_config). The default "host" is 2 to avoid conflicting wiht default "spi_config" settings.
+- When not using system SPI, "mosi" for data out, "miso" for data in and "clk" **must** be set
+- The esp32 has a special I/O multiplexer for faster speed (up to 80 MHz) but that requires using specific GPIOs, which depends on SPI bus (See [here](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/spi_master.html) for more details)
+
+| Pin Name | SPI2 | SPI3 |
+| -------- | ---- | ---- |		
+| CS0*     |  15  |  5   |
+| SCLK	   |  14  |  18  |
+| MISO	   |  12  |  19  |
+| MOSI	   |  13  |  23  |
+	
+** THIS IS NOT AVAILABLE YET, SO MORE TO COME ON HOW TO USE WIRED ETHERNET***
 ### Battery / ADC
 The NVS parameter "bat_config" sets the ADC1 channel used to measure battery/DC voltage. The "atten" value attenuates the input voltage to the ADC input (the read value maintains a 0-1V rage) where: 0=no attenuation(0..800mV), 1=2.5dB attenuation(0..1.1V), 2=6dB attenuation(0..1.35V), 3=11dB attenuation(0..2.6V). Scale is a float ratio applied to every sample of the 12 bits ADC. A measure is taken every 10s and an average is made every 5 minutes (not a sliding window). Syntax is
 ```
-channel=0..7,scale=<scale>,cells=<2|3>,[atten=<0|1|2|3>]
+channel=0..7,scale=<scale>,cells=<2|3>[,atten=<0|1|2|3>]
 ```
 NB: Set parameter to empty to disable battery reading. For well-known configuration, this is ignored (except for SqueezeAMP where number of cells is required)
 # Configuration
@@ -475,7 +523,7 @@ If you have already cloned the repository and you are getting compile errors on 
 	- per mad & few others, edit configure and change $ac_link to add -c (faking link)
 	- change ac_files to remove ''
 	- add DEPS_CFLAGS and DEPS_LIBS to avoid pkg-config to be required
-	- stack consumption can be very high with some codec variants, so set NONTHREADSAFE_PSEUDOSTACK and GLOBAL_STACK_SIZE=32000 and unset VAR_ARRAYS in config.h
+	- stack consumption can be very high with some codec variants, so set NONTHREADSAFE_PSEUDOSTACK and GLOBAL_STACK_SIZE=48000 and unset VAR_ARRAYS in config.h
 - libmad has been patched to avoid using a lot of stack and is not provided here. There is an issue with sync detection in 1.15.1b from where the original stack patch was done but since a few fixes have been made wrt sync detection. This 1.15.1b-10 found on debian fixes the issue where mad thinks it has reached sync but has not and so returns a wrong sample rate. It comes at the expense of 8KB (!) of code where a simple check in squeezelite/mad.c that next_frame[0] is 0xff and next_frame[1] & 0xf0 is 0xf0 does the trick ...
 
 # Footnotes

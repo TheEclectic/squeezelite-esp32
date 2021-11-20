@@ -28,7 +28,7 @@
 
 static const char *TAG = "led";
 
-static struct led_s {
+static EXT_RAM_ATTR struct led_s {
 	gpio_num_t gpio;
 	bool on;
 	int onstate;
@@ -40,6 +40,7 @@ static struct led_s {
 	TimerHandle_t timer;
 } leds[MAX_LED];
 
+// can't use EXT_RAM_ATTR for initialized structure
 static struct {
 	int gpio;
 	int active;

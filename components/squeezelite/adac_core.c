@@ -26,8 +26,16 @@ static int i2c_port = -1;
 int adac_init(char *config, int i2c_port_num) {	 
 	char *p;
 	int i2c_addr = 0;
-	i2c_port = i2c_port_num;
 	
+	// some crappy codecs require MCLK to work
+	if ((p = strcasestr(config, "mck")) != NULL) {
+		ESP_LOGI(TAG, "Configuring MCLK on GPIO0");
+		PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
+		REG_WRITE(PIN_CTRL, 0xFFFFFFF0);
+	}	
+	
+	i2c_port = i2c_port_num;
+
 	// configure i2c
 	i2c_config_t i2c_config = {
 			.mode = I2C_MODE_MASTER,
@@ -142,8 +150,7 @@ uint16_t adac_read_word(int i2c_addr, uint8_t reg) {
 /****************************************************************************************
  * 
  */
-esp_err_t adac_write_word(int i2c_addr, uint8_t reg, uint16_t val)
-{
+esp_err_t adac_write_word(int i2c_addr, uint8_t reg, uint16_t val) {
 	uint8_t data[] = { i2c_addr << 1, reg,
 	                   val >> 8, val & 0xff };
 					   
@@ -162,3 +169,25 @@ esp_err_t adac_write_word(int i2c_addr, uint8_t reg, uint16_t val)
 	
     return ret;
 }
+
+/****************************************************************************************
+ * 
+ */
+esp_err_t adac_write(int i2c_addr, uint8_t reg, uint8_t *data, size_t count) {
+	i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+	
+	i2c_master_write_byte(cmd, (i2c_addr << 1) | I2C_MASTER_WRITE, I2C_MASTER_NACK);
+	i2c_master_write_byte(cmd, reg, I2C_MASTER_NACK);
+	i2c_master_write(cmd, data, count, I2C_MASTER_NACK);
+	
+	i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(i2c_port, cmd, 200 / portTICK_RATE_MS);
+    i2c_cmd_link_delete(cmd);
+	
+	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "I2C write failed");
+	}
+	
+	return ret;
+}	

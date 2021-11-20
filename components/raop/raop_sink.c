@@ -25,6 +25,11 @@
 #define CONFIG_AIRPLAY_NAME		"ESP32-AirPlay"
 #endif
 
+static EXT_RAM_ATTR struct raop_cb_s {
+	raop_cmd_vcb_t cmd;
+	raop_data_cb_t data;
+} raop_cbs;
+
 log_level	raop_loglevel = lINFO;
 log_level	util_loglevel;
 
@@ -88,7 +93,7 @@ const static actrls_t controls = {
 	NULL, NULL,							// rew, fwd
 	raop_prev, raop_next,				// prev, next
 	NULL, NULL, NULL, NULL, // left, right, up, down
-	NULL, NULL, NULL, NULL, NULL, NULL, NULL, // pre1-6
+	NULL, NULL, NULL, NULL, NULL, NULL, // pre1-6
 	raop_volume_down, raop_volume_up, raop_toggle// knob left, knob_right, knob push
 };
 
@@ -150,17 +155,27 @@ void raop_sink_deinit(void) {
 }	
 
 /****************************************************************************************
- * Airplay sink initialization
+ * Airplay sink startup
  */
-void raop_sink_init(raop_cmd_vcb_t cmd_cb, raop_data_cb_t data_cb) {
-    const char *hostname;
+static bool raop_sink_start(raop_cmd_vcb_t cmd_cb, raop_data_cb_t data_cb) {
+    const char *hostname = NULL;
 	char sink_name[64-6] = CONFIG_AIRPLAY_NAME;
-	tcpip_adapter_ip_info_t ipInfo; 
+	tcpip_adapter_ip_info_t ipInfo = { }; 
 	struct in_addr host;
+	tcpip_adapter_if_t ifs[] = { TCPIP_ADAPTER_IF_ETH, TCPIP_ADAPTER_IF_STA, TCPIP_ADAPTER_IF_AP };
    	
 	// get various IP info
-	tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_STA, &ipInfo);
-	tcpip_adapter_get_hostname(TCPIP_ADAPTER_IF_STA, &hostname);
+	for (int i = 0; i < sizeof(ifs) / sizeof(tcpip_adapter_if_t); i++) 
+		if (tcpip_adapter_get_ip_info(ifs[i], &ipInfo) == ESP_OK && ipInfo.ip.addr != IPADDR_ANY) {
+			tcpip_adapter_get_hostname(ifs[i], &hostname);			
+			break;
+		}
+	
+	if (!hostname) {
+		LOG_INFO( "no hostname/IP found, can't start AirPlay");
+		return false;
+	}
+	
 	host.s_addr = ipInfo.ip.addr;
 
     // initialize mDNS
@@ -168,7 +183,7 @@ void raop_sink_init(raop_cmd_vcb_t cmd_cb, raop_data_cb_t data_cb) {
     ESP_ERROR_CHECK( mdns_hostname_set(hostname) );
         
     char * sink_name_buffer= (char *)config_alloc_get(NVS_TYPE_STR,"airplay_name");
-    if(sink_name_buffer != NULL){
+    if (sink_name_buffer != NULL){
     	memset(sink_name, 0x00, sizeof(sink_name));
     	strncpy(sink_name,sink_name_buffer,sizeof(sink_name)-1 );
     	free(sink_name_buffer);
@@ -181,6 +196,30 @@ void raop_sink_init(raop_cmd_vcb_t cmd_cb, raop_data_cb_t data_cb) {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
 	cmd_handler_chain = cmd_cb;
 	raop = raop_create(host, sink_name, mac, 0, cmd_handler, data_cb);
+	
+	return true;
+}
+
+/****************************************************************************************
+ * Airplay sink timer handler
+ */
+static void raop_start_handler( TimerHandle_t xTimer ) {
+	if (raop_sink_start(raop_cbs.cmd, raop_cbs.data)) {
+		xTimerDelete(xTimer, portMAX_DELAY);
+	}	
+}	
+
+/****************************************************************************************
+ * Airplay sink initialization
+ */
+void raop_sink_init(raop_cmd_vcb_t cmd_cb, raop_data_cb_t data_cb) {
+	if (!raop_sink_start(cmd_cb, data_cb)) {
+		raop_cbs.cmd = cmd_cb;
+		raop_cbs.data = data_cb;
+		TimerHandle_t timer = xTimerCreate("raopStart", 5000 / portTICK_RATE_MS, pdTRUE, NULL, raop_start_handler);
+		xTimerStart(timer, portMAX_DELAY);
+		LOG_INFO( "Delaying AirPlay start");		
+	}	
 }
 
 /****************************************************************************************
